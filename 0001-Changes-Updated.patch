@@ -1,0 +1,104 @@
+From 2822c6f5416ab15fdd14c618690e530a08e5d4a4 Mon Sep 17 00:00:00 2001
+From: Kongu10 <kongunathan10@gmail.com>
+Date: Wed, 13 Mar 2024 00:47:07 +0530
+Subject: [PATCH] Changes Updated
+
+---
+ src/DataManipulator.ts | 34 +++++++++++++++++++++++-----------
+ src/Graph.tsx          | 16 +++++++++++-----
+ 2 files changed, 34 insertions(+), 16 deletions(-)
+
+diff --git a/src/DataManipulator.ts b/src/DataManipulator.ts
+index 7f62295..ac4bf1e 100644
+--- a/src/DataManipulator.ts
++++ b/src/DataManipulator.ts
+@@ -1,20 +1,32 @@
+ import { ServerRespond } from './DataStreamer';
+ 
+ export interface Row {
+-  stock: string,
+-  top_ask_price: number,
++  price_abc: number,
++  price_def: number,
++  ratio: number,
+   timestamp: Date,
++  upper_bound: number,
++  lower_bound: number,
++  trigger_alert: number | undefined,
+ }
+ 
+ 
+ export class DataManipulator {
+-  static generateRow(serverResponds: ServerRespond[]) {
+-    return serverResponds.map((el: any) => {
+-      return {
+-        stock: el.stock,
+-        top_ask_price: el.top_ask && el.top_ask.price || 0,
+-        timestamp: el.timestamp,
++  static generateRow(serverResponds: ServerRespond[]): Row {
++		const priceABC = (serverRespond[0].top_ask.price + serverRespond[0].top_bid.price) / 2;
++        const priceDEF = (serverRespond[1].top_ask.price + serverRespond[1].top_bid.price) / 2;
++        const ratio = priceABC / priceDEF;
++        const upperBound = 1 + 0.05;
++        const lowerBound = 1 - 0.05;
++        return {
++            price_abc: priceABC,
++            price_def: priceDEF,
++            ratio,
++            timestamp: serverRespond[0].timestamp > serverRespond[1].timestamp ?
++                serverRespond[0].timestamp : serverRespond[1].timestamp,
++            upper_bound: upperBound,
++            lower_bound: lowerBound,
++            trigger_alert: (ratio > upperBound || ratio < lowerBound) ? ratio : undefined,
+       };
+-    })
+-  }
+-}
++    }
++  }
+\ No newline at end of file
+diff --git a/src/Graph.tsx b/src/Graph.tsx
+index 277797d..7dfe240 100644
+--- a/src/Graph.tsx
++++ b/src/Graph.tsx
+@@ -27,6 +27,9 @@ class Graph extends Component<IProps, {}> {
+       top_ask_price: 'float',
+       top_bid_price: 'float',
+       timestamp: 'date',
++	  upper_bound: 'float',
++      lower_bound: 'float',
++      trigger_alert: 'float'
+     };
+ 
+     if (window.perspective && window.perspective.worker()) {
+@@ -40,19 +43,22 @@ class Graph extends Component<IProps, {}> {
+       elem.setAttribute('row-pivots', '["timestamp"]');
+       elem.setAttribute('columns', '["top_ask_price"]');
+       elem.setAttribute('aggregates', JSON.stringify({
+-        stock: 'distinctcount',
+-        top_ask_price: 'avg',
+-        top_bid_price: 'avg',
++        price_abc: 'avg',
++        price_def: 'avg',
++        ratio: 'avg',
+         timestamp: 'distinct count',
++        upper_bound: 'avg',
++        lower_bound: 'avg',
++        trigger_alert: 'avg'
+       }));
+     }
+   }
+ 
+   componentDidUpdate() {
+     if (this.table) {
+-      this.table.update(
++      this.table.update([
+         DataManipulator.generateRow(this.props.data),
+-      );
++      ] as unknown as TableData);
+     }
+   }
+ }
+-- 
+2.42.0.windows.2
+
