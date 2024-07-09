@@ -1,0 +1,1383 @@
+From 1a14c80c2d4f9cdfd6dc450ec4eb82b0f2643bbf Mon Sep 17 00:00:00 2001
+From: Shanmugesh <149296635+shanmugesh-developers@users.noreply.github.com>
+Date: Tue, 9 Jul 2024 14:28:00 +0530
+Subject: [PATCH 1/4] Delete datafeed directory
+
+---
+ datafeed/requirements.txt |   1 -
+ datafeed/server3.py       | 320 --------------------------------------
+ 2 files changed, 321 deletions(-)
+ delete mode 100644 datafeed/requirements.txt
+ delete mode 100644 datafeed/server3.py
+
+diff --git a/datafeed/requirements.txt b/datafeed/requirements.txt
+deleted file mode 100644
+index f678e827e2..0000000000
+--- a/datafeed/requirements.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-python-dateutil==2.8.2
+\ No newline at end of file
+diff --git a/datafeed/server3.py b/datafeed/server3.py
+deleted file mode 100644
+index 2de4e28018..0000000000
+--- a/datafeed/server3.py
++++ /dev/null
+@@ -1,320 +0,0 @@
+-################################################################################
+-#
+-#  Permission is hereby granted, free of charge, to any person obtaining a
+-#  copy of this software and associated documentation files (the "Software"),
+-#  to deal in the Software without restriction, including without limitation
+-#  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+-#  and/or sell copies of the Software, and to permit persons to whom the
+-#  Software is furnished to do so, subject to the following conditions:
+-#
+-#  The above copyright notice and this permission notice shall be included in
+-#  all copies or substantial portions of the Software.
+-#
+-#  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+-#  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-#  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-#  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+-#  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+-#  DEALINGS IN THE SOFTWARE.
+-
+-#from itertools import izip
+-from random    import normalvariate, random
+-from datetime  import timedelta, datetime
+-
+-import csv
+-import dateutil.parser
+-import os.path
+-
+-import operator
+-import json
+-import re
+-import threading
+-
+-#from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
+-import http.server
+-from socketserver   import ThreadingMixIn
+-
+-################################################################################
+-#
+-# Config
+-
+-# Sim params
+-
+-REALTIME    = True
+-SIM_LENGTH  = timedelta(days = 365 * 5)
+-MARKET_OPEN = datetime.today().replace(hour = 0, minute = 30, second = 0)
+-
+-# Market parms
+-#       min  / max  / std
+-SPD  = (2.0,   6.0,   0.1)
+-PX   = (60.0,  150.0, 1)
+-FREQ = (12,    36,   50)
+-
+-# Trades
+-
+-OVERLAP = 4
+-
+-################################################################################
+-#
+-# Test Data
+-
+-def bwalk(min, max, std):
+-    """ Generates a bounded random walk. """
+-    rng = max - min
+-    while True:
+-        max += normalvariate(0, std)
+-        yield abs((max % (rng * 2)) - rng) + min
+-
+-def market(t0 = MARKET_OPEN):
+-    """ Generates a random series of market conditions,
+-        (time, price, spread).
+-    """
+-    for hours, px, spd in zip(bwalk(*FREQ), bwalk(*PX), bwalk(*SPD)):
+-        yield t0, px, spd
+-        t0 += timedelta(hours = abs(hours))
+-
+-def orders(hist):
+-    """ Generates a random set of limit orders (time, side, price, size) from
+-        a series of market conditions.
+-    """
+-    for t, px, spd in hist:
+-        stock = 'ABC' if random() > 0.5 else 'DEF'
+-        side, d  = ('sell', 2) if random() > 0.5 else ('buy', -2)
+-        order = round(normalvariate(px + (spd / d), spd / OVERLAP), 2)
+-        size  = int(abs(normalvariate(0, 100)))
+-        yield t, stock, side, order, size
+-
+-
+-################################################################################
+-#
+-# Order Book
+-
+-def add_book(book, order, size, _age = 10):
+-    """ Add a new order and size to a book, and age the rest of the book. """
+-    yield order, size, _age
+-    for o, s, age in book:
+-        if age > 0:
+-            yield o, s, age - 1
+-
+-def clear_order(order, size, book, op = operator.ge, _notional = 0):
+-    """ Try to clear a sized order against a book, returning a tuple of
+-        (notional, new_book) if successful, and None if not.  _notional is a
+-        recursive accumulator and should not be provided by the caller.
+-    """
+-    (top_order, top_size, age), tail = book[0], book[1:]
+-    if op(order, top_order):
+-        _notional += min(size, top_size) * top_order
+-        sdiff = top_size - size
+-        if sdiff > 0:
+-            return _notional, list(add_book(tail, top_order, sdiff, age))
+-        elif len(tail) > 0:
+-            return clear_order(order, -sdiff, tail, op, _notional)
+-
+-def clear_book(buy = None, sell = None):
+-    """ Clears all crossed orders from a buy and sell book, returning the new
+-        books uncrossed.
+-    """
+-    while buy and sell:
+-        order, size, _ = buy[0]
+-        new_book = clear_order(order, size, sell)
+-        if new_book:
+-            sell = new_book[1]
+-            buy  = buy[1:]
+-        else:
+-            break
+-    return buy, sell
+-
+-def order_book(orders, book, stock_name):
+-    """ Generates a series of order books from a series of orders.  Order books
+-        are mutable lists, and mutating them during generation will affect the
+-        next turn!
+-    """
+-    for t, stock, side, order, size in orders:
+-        if stock_name == stock:
+-            new = add_book(book.get(side, []), order, size)
+-            book[side] = sorted(new, reverse = side == 'buy', key = lambda x: x[0])
+-        bids, asks = clear_book(**book)
+-        yield t, bids, asks
+-
+-################################################################################
+-#
+-# Test Data Persistence
+-
+-def generate_csv():
+-    """ Generate a CSV of order history. """
+-    with open('test.csv', 'wb') as f:
+-        writer = csv.writer(f)
+-        for t, stock, side, order, size in orders(market()):
+-            if t > MARKET_OPEN + SIM_LENGTH:
+-                break
+-            writer.writerow([t, stock, side, order, size])
+-
+-def read_csv():
+-    """ Read a CSV or order history into a list. """
+-    with open('test.csv', 'rt') as f:
+-        for time, stock, side, order, size in csv.reader(f):
+-            yield dateutil.parser.parse(time), stock, side, float(order), int(size)
+-
+-################################################################################
+-#
+-# Server
+-
+-class ThreadedHTTPServer(ThreadingMixIn, http.server.HTTPServer):
+-    """ Boilerplate class for a multithreaded HTTP Server, with working
+-        shutdown.
+-    """
+-    allow_reuse_address = True
+-    def shutdown(self):
+-        """ Override MRO to shutdown properly. """
+-        self.socket.close()
+-        http.server.HTTPServer.shutdown(self)
+-
+-def route(path):
+-    """ Decorator for a simple bottle-like web framework.  Routes path to the
+-        decorated method, with the rest of the path as an argument.
+-    """
+-    def _route(f):
+-        setattr(f, '__route__', path)
+-        return f
+-    return _route
+-
+-def read_params(path):
+-    """ Read query parameters into a dictionary if they are parseable,
+-        otherwise returns None.
+-    """
+-    query = path.split('?')
+-    if len(query) > 1:
+-        query = query[1].split('&')
+-        return dict(map(lambda x: x.split('='), query))
+-
+-def get(req_handler, routes):
+-    """ Map a request to the appropriate route of a routes instance. """
+-    for name, handler in routes.__class__.__dict__.items():
+-        if hasattr(handler, "__route__"):
+-            if None != re.search(handler.__route__, req_handler.path):
+-                req_handler.send_response(200)
+-                req_handler.send_header('Content-Type', 'application/json')
+-                req_handler.send_header('Access-Control-Allow-Origin', '*')
+-                req_handler.end_headers()
+-                params = read_params(req_handler.path)
+-                data = json.dumps(handler(routes, params)) + '\n'
+-                req_handler.wfile.write(bytes(data,  encoding = 'utf-8'))
+-                return
+-
+-def run(routes, host = '0.0.0.0', port = 8080):
+-    """ Runs a class as a server whose methods have been decorated with
+-        @route.
+-    """
+-    class RequestHandler(http.server.BaseHTTPRequestHandler):
+-        def log_message(self, *args, **kwargs):
+-            pass
+-        def do_GET(self):
+-            get(self, routes)
+-    server = ThreadedHTTPServer((host, port), RequestHandler)
+-    thread = threading.Thread(target = server.serve_forever)
+-    thread.daemon = True
+-    thread.start()
+-    print ('HTTP server started on port 8080')
+-    while True:
+-        from time import sleep
+-        sleep(1)
+-    server.shutdown()
+-    server.start()
+-    server.waitForThread()
+-
+-################################################################################
+-#
+-# App
+-
+-ops = {
+-    'buy':  operator.le,
+-    'sell': operator.ge,
+-}
+-
+-class App(object):
+-    """ The trading game server application. """
+-
+-    def __init__(self):
+-        self._book_1    = dict()
+-        self._book_2    = dict()
+-        self._data_1    = order_book(read_csv(), self._book_1, 'ABC')
+-        self._data_2    = order_book(read_csv(), self._book_2, 'DEF')
+-        self._rt_start = datetime.now()
+-        self._sim_start, _, _  = next(self._data_1)
+-        self.read_10_first_lines()
+-
+-    @property
+-    def _current_book_1(self):
+-        for t, bids, asks in self._data_1:
+-            if REALTIME:
+-                while t > self._sim_start + (datetime.now() - self._rt_start):
+-                    yield t, bids, asks
+-            else:
+-                yield t, bids, asks
+-
+-    @property
+-    def _current_book_2(self):
+-        for t, bids, asks in self._data_2:
+-            if REALTIME:
+-                while t > self._sim_start + (datetime.now() - self._rt_start):
+-                    yield t, bids, asks
+-            else:
+-                yield t, bids, asks
+-
+-    def read_10_first_lines(self):
+-            for _ in iter(range(10)):
+-                next(self._data_1)
+-                next(self._data_2)
+-
+-    @route('/query')
+-    def handle_query(self, x):
+-        """ Takes no arguments, and yields the current top of the book;  the
+-            best bid and ask and their sizes
+-        """
+-        try:
+-            t1, bids1, asks1 = next(self._current_book_1)
+-            t2, bids2, asks2 = next(self._current_book_2)
+-        except Exception as e:
+-            print ("error getting stocks...reinitalizing app")
+-            self.__init__()
+-            t1, bids1, asks1 = next(self._current_book_1)
+-            t2, bids2, asks2 = next(self._current_book_2)
+-        t = t1 if t1 > t2 else t2
+-        print ('Query received @ t%s' % t)
+-        return [{
+-            'id': x and x.get('id', None),
+-            'stock': 'ABC',
+-            'timestamp': str(t),
+-            'top_bid': bids1 and {
+-                'price': bids1[0][0],
+-                'size': bids1[0][1]
+-            },
+-            'top_ask': asks1 and {
+-                'price': asks1[0][0],
+-                'size': asks1[0][1]
+-            }
+-        },
+-        {
+-            'id': x and x.get('id', None),
+-            'stock': 'DEF',
+-            'timestamp': str(t),
+-            'top_bid': bids2 and {
+-                'price': bids2[0][0],
+-                'size': bids2[0][1]
+-            },
+-            'top_ask': asks2 and {
+-                'price': asks2[0][0],
+-                'size': asks2[0][1]
+-            }
+-        }]
+-
+-################################################################################
+-#
+-# Main
+-
+-if __name__ == '__main__':
+-    if not os.path.isfile('test.csv'):
+-        print ("No data found, generating...")
+-        generate_csv()
+-    run(App())
+
+From e1eedd93b13ce678abb79d8da5fb8c23d4a3365c Mon Sep 17 00:00:00 2001
+From: Shanmugesh <149296635+shanmugesh-developers@users.noreply.github.com>
+Date: Tue, 9 Jul 2024 14:28:32 +0530
+Subject: [PATCH 2/4] Delete public directory
+
+---
+ public/favicon.ico   | Bin 3870 -> 0 bytes
+ public/index.html    |  46 -------------------------------------------
+ public/manifest.json |  15 --------------
+ 3 files changed, 61 deletions(-)
+ delete mode 100755 public/favicon.ico
+ delete mode 100755 public/index.html
+ delete mode 100755 public/manifest.json
+
+diff --git a/public/favicon.ico b/public/favicon.ico
+deleted file mode 100755
+index a11777cc471a4344702741ab1c8a588998b1311a..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 3870
+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
+baj7?x%VD!5Cxk2YbYLNVeiXvvpMCWYo=by@
+
+diff --git a/public/index.html b/public/index.html
+deleted file mode 100755
+index b40568f049..0000000000
+--- a/public/index.html
++++ /dev/null
+@@ -1,46 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-  <head>
+-    <meta charset="utf-8" />
+-    <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico" />
+-    <meta
+-      name="viewport"
+-      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+-    />
+-    <meta name="theme-color" content="#000000" />
+-    <!--
+-      manifest.json provides metadata used when your web app is added to the
+-      homescreen on Android. See https://developers.google.com/web/fundamentals/web-app-manifest/
+-    -->
+-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+-    <!--
+-      Notice the use of %PUBLIC_URL% in the tags above.
+-      It will be replaced with the URL of the `public` folder during the build.
+-      Only files inside the `public` folder can be referenced from the HTML.
+-
+-      Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
+-      work correctly both with client-side routing and a non-root public URL.
+-      Learn how to configure a non-root public URL by running `npm run build`.
+-    -->
+-    <script src="https://unpkg.com/@jpmorganchase/perspective/build/perspective.js"></script>
+-    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer/build/perspective.view.js"></script>
+-    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer-hypergrid/build/hypergrid.plugin.js"></script>
+-    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer-highcharts/build/highcharts.plugin.js"></script>
+-    <link rel='stylesheet' href="https://unpkg.com/@jpmorganchase/perspective-viewer/build/material.css" is="custom-style">
+-    <title>React App</title>
+-  </head>
+-  <body>
+-    <noscript>You need to enable JavaScript to run this app.</noscript>
+-    <div id="root"></div>
+-    <!--
+-      This HTML file is a template.
+-      If you open it directly in the browser, you will see an empty page.
+-
+-      You can add webfonts, meta tags, or analytics to this file.
+-      The build step will place the bundled scripts into the <body> tag.
+-
+-      To begin the development, run `npm start` or `yarn start`.
+-      To create a production bundle, use `npm run build` or `yarn build`.
+-    -->
+-  </body>
+-</html>
+diff --git a/public/manifest.json b/public/manifest.json
+deleted file mode 100755
+index 1f2f141faf..0000000000
+--- a/public/manifest.json
++++ /dev/null
+@@ -1,15 +0,0 @@
+-{
+-  "short_name": "React App",
+-  "name": "Create React App Sample",
+-  "icons": [
+-    {
+-      "src": "favicon.ico",
+-      "sizes": "64x64 32x32 24x24 16x16",
+-      "type": "image/x-icon"
+-    }
+-  ],
+-  "start_url": ".",
+-  "display": "standalone",
+-  "theme_color": "#000000",
+-  "background_color": "#ffffff"
+-}
+
+From d83a9ad9f4277f674e709f6a042259483bf8ba21 Mon Sep 17 00:00:00 2001
+From: Shanmugesh <149296635+shanmugesh-developers@users.noreply.github.com>
+Date: Tue, 9 Jul 2024 14:28:49 +0530
+Subject: [PATCH 3/4] Delete src directory
+
+---
+ src/App.css            | 49 ----------------------------------
+ src/App.test.js        |  9 -------
+ src/App.tsx            | 59 -----------------------------------------
+ src/DataManipulator.ts | 20 --------------
+ src/DataStreamer.ts    | 31 ----------------------
+ src/Graph.css          |  4 ---
+ src/Graph.tsx          | 60 ------------------------------------------
+ src/index.css          | 14 ----------
+ src/index.tsx          | 11 --------
+ src/react-app-env.d.ts |  1 -
+ 10 files changed, 258 deletions(-)
+ delete mode 100755 src/App.css
+ delete mode 100755 src/App.test.js
+ delete mode 100755 src/App.tsx
+ delete mode 100644 src/DataManipulator.ts
+ delete mode 100644 src/DataStreamer.ts
+ delete mode 100644 src/Graph.css
+ delete mode 100644 src/Graph.tsx
+ delete mode 100755 src/index.css
+ delete mode 100755 src/index.tsx
+ delete mode 100644 src/react-app-env.d.ts
+
+diff --git a/src/App.css b/src/App.css
+deleted file mode 100755
+index 1a8747ad99..0000000000
+--- a/src/App.css
++++ /dev/null
+@@ -1,49 +0,0 @@
+-.App {
+-  text-align: center;
+-  min-height: 100vh;
+-}
+-
+-.App-logo {
+-  animation: App-logo-spin infinite 20s linear;
+-  height: 40vmin;
+-}
+-
+-.App-header {
+-  display: flex;
+-  flex-direction: column;
+-  align-items: center;
+-  justify-content: center;
+-  font-size: calc(10px + 2vmin);
+-  margin-bottom: 12px;
+-}
+-
+-.App-link {
+-  color: #61dafb;
+-}
+-
+-.App-content {
+-  display: flex;
+-  flex-direction: column;
+-  align-items: center;
+-  justify-content: center;
+-  margin-bottom: 12px;
+-}
+-
+-.Stream-button {
+-  margin-bottom: 12px;
+-}
+-
+-.Graph {
+-  min-height: 50vh;
+-  width: 700px;
+-  margin-bottom: 12px;
+-}
+-
+-@keyframes App-logo-spin {
+-  from {
+-    transform: rotate(0deg);
+-  }
+-  to {
+-    transform: rotate(360deg);
+-  }
+-}
+diff --git a/src/App.test.js b/src/App.test.js
+deleted file mode 100755
+index a754b201bf..0000000000
+--- a/src/App.test.js
++++ /dev/null
+@@ -1,9 +0,0 @@
+-import React from 'react';
+-import ReactDOM from 'react-dom';
+-import App from './App';
+-
+-it('renders without crashing', () => {
+-  const div = document.createElement('div');
+-  ReactDOM.render(<App />, div);
+-  ReactDOM.unmountComponentAtNode(div);
+-});
+diff --git a/src/App.tsx b/src/App.tsx
+deleted file mode 100755
+index 274d20b0a0..0000000000
+--- a/src/App.tsx
++++ /dev/null
+@@ -1,59 +0,0 @@
+-import React, { Component } from 'react';
+-import DataStreamer, { ServerRespond } from './DataStreamer';
+-import Graph from './Graph';
+-import './App.css';
+-
+-interface IState {
+-  data: ServerRespond[],
+-  showGraph: boolean,
+-}
+-
+-class App extends Component<{}, IState> {
+-  constructor(props: {}) {
+-    super(props);
+-    this.state = {
+-      data: [],
+-      showGraph: false,
+-    };
+-  }
+-
+-  renderGraph() {
+-    if (this.state.showGraph) {
+-      return (<Graph data={this.state.data}/>)
+-    }
+-  }
+-
+-  getDataFromServer() {
+-    let x = 0;
+-    const interval = setInterval(() => {
+-      DataStreamer.getData((serverResponds: ServerRespond[]) => {
+-        this.setState({
+-          data: serverResponds,
+-          showGraph: true,
+-        });
+-      });
+-      x++;
+-      if (x > 1000) {
+-        clearInterval(interval);
+-      }
+-    }, 100);
+-  }
+-
+-  render() {
+-    return (
+-      <div className="App">
+-        <header className="App-header">
+-          Bank Merge & Co Task 3
+-        </header>
+-        <div className="App-content">
+-          <button className="btn btn-primary Stream-button" onClick={() => {this.getDataFromServer()}}>Start Streaming Data</button>
+-          <div className="Graph">
+-            {this.renderGraph()}
+-          </div>
+-        </div>
+-      </div>
+-    )
+-  }
+-}
+-
+-export default App;
+diff --git a/src/DataManipulator.ts b/src/DataManipulator.ts
+deleted file mode 100644
+index 7f622955cc..0000000000
+--- a/src/DataManipulator.ts
++++ /dev/null
+@@ -1,20 +0,0 @@
+-import { ServerRespond } from './DataStreamer';
+-
+-export interface Row {
+-  stock: string,
+-  top_ask_price: number,
+-  timestamp: Date,
+-}
+-
+-
+-export class DataManipulator {
+-  static generateRow(serverResponds: ServerRespond[]) {
+-    return serverResponds.map((el: any) => {
+-      return {
+-        stock: el.stock,
+-        top_ask_price: el.top_ask && el.top_ask.price || 0,
+-        timestamp: el.timestamp,
+-      };
+-    })
+-  }
+-}
+diff --git a/src/DataStreamer.ts b/src/DataStreamer.ts
+deleted file mode 100644
+index 9d9eca7897..0000000000
+--- a/src/DataStreamer.ts
++++ /dev/null
+@@ -1,31 +0,0 @@
+-export interface Order {
+-  price: number,
+-  size: number,
+-}
+-export interface ServerRespond {
+-  stock: string,
+-  top_bid: Order,
+-  top_ask: Order,
+-  timestamp: Date,
+-}
+-
+-class DataStreamer {
+-  static API_URL: string = 'http://localhost:8080/query?id=1';
+-
+-  static getData(callback: (data: ServerRespond[]) => void): void {
+-    const request = new XMLHttpRequest();
+-    request.open('GET', DataStreamer.API_URL, false);
+-
+-    request.onload = () => {
+-      if (request.status === 200) {
+-        callback(JSON.parse(request.responseText));
+-      } else {
+-        alert ('Request failed');
+-      }
+-    }
+-
+-    request.send();
+-  }
+-}
+-
+-export default DataStreamer;
+\ No newline at end of file
+diff --git a/src/Graph.css b/src/Graph.css
+deleted file mode 100644
+index c77c56054e..0000000000
+--- a/src/Graph.css
++++ /dev/null
+@@ -1,4 +0,0 @@
+-perspective-viewer {
+-  height: 50vh;
+-  width: 700px;
+-}
+\ No newline at end of file
+diff --git a/src/Graph.tsx b/src/Graph.tsx
+deleted file mode 100644
+index 277797d933..0000000000
+--- a/src/Graph.tsx
++++ /dev/null
+@@ -1,60 +0,0 @@
+-import React, { Component } from 'react';
+-import { Table } from '@finos/perspective';
+-import { ServerRespond } from './DataStreamer';
+-import { DataManipulator } from './DataManipulator';
+-import './Graph.css';
+-
+-interface IProps {
+-  data: ServerRespond[],
+-}
+-
+-interface PerspectiveViewerElement extends HTMLElement {
+-  load: (table: Table) => void,
+-}
+-class Graph extends Component<IProps, {}> {
+-  table: Table | undefined;
+-
+-  render() {
+-    return React.createElement('perspective-viewer');
+-  }
+-
+-  componentDidMount() {
+-    // Get element from the DOM.
+-    const elem = document.getElementsByTagName('perspective-viewer')[0] as unknown as PerspectiveViewerElement;
+-
+-    const schema = {
+-      stock: 'string',
+-      top_ask_price: 'float',
+-      top_bid_price: 'float',
+-      timestamp: 'date',
+-    };
+-
+-    if (window.perspective && window.perspective.worker()) {
+-      this.table = window.perspective.worker().table(schema);
+-    }
+-    if (this.table) {
+-      // Load the `table` in the `<perspective-viewer>` DOM reference.
+-      elem.load(this.table);
+-      elem.setAttribute('view', 'y_line');
+-      elem.setAttribute('column-pivots', '["stock"]');
+-      elem.setAttribute('row-pivots', '["timestamp"]');
+-      elem.setAttribute('columns', '["top_ask_price"]');
+-      elem.setAttribute('aggregates', JSON.stringify({
+-        stock: 'distinctcount',
+-        top_ask_price: 'avg',
+-        top_bid_price: 'avg',
+-        timestamp: 'distinct count',
+-      }));
+-    }
+-  }
+-
+-  componentDidUpdate() {
+-    if (this.table) {
+-      this.table.update(
+-        DataManipulator.generateRow(this.props.data),
+-      );
+-    }
+-  }
+-}
+-
+-export default Graph;
+diff --git a/src/index.css b/src/index.css
+deleted file mode 100755
+index cee5f348fb..0000000000
+--- a/src/index.css
++++ /dev/null
+@@ -1,14 +0,0 @@
+-body {
+-  margin: 0;
+-  padding: 0;
+-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+-    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
+-    sans-serif;
+-  -webkit-font-smoothing: antialiased;
+-  -moz-osx-font-smoothing: grayscale;
+-}
+-
+-code {
+-  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+-    monospace;
+-}
+diff --git a/src/index.tsx b/src/index.tsx
+deleted file mode 100755
+index f742118e14..0000000000
+--- a/src/index.tsx
++++ /dev/null
+@@ -1,11 +0,0 @@
+-import React from 'react';
+-import ReactDOM from 'react-dom';
+-import App from './App';
+-import './index.css';
+-import 'bootstrap/dist/css/bootstrap.css';
+-
+-declare global {
+-  interface Window { perspective: any; }
+-}
+-
+-ReactDOM.render(<App />, document.getElementById('root'));
+diff --git a/src/react-app-env.d.ts b/src/react-app-env.d.ts
+deleted file mode 100644
+index 6431bc5fc6..0000000000
+--- a/src/react-app-env.d.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-/// <reference types="react-scripts" />
+
+From fa5eb9a7aa0b48d7a909e94ec2ec2de454c198ae Mon Sep 17 00:00:00 2001
+From: Shanmugesh <149296635+shanmugesh-developers@users.noreply.github.com>
+Date: Tue, 9 Jul 2024 14:30:24 +0530
+Subject: [PATCH 4/4] Add files via upload
+
+---
+ public/favicon.ico     | Bin 0 -> 3870 bytes
+ public/index.html      |  46 ++++++++++++++++++++++++++++
+ public/manifest.json   |  15 ++++++++++
+ src/App.css            |  49 ++++++++++++++++++++++++++++++
+ src/App.test.js        |   9 ++++++
+ src/App.tsx            |  59 ++++++++++++++++++++++++++++++++++++
+ src/DataManipulator.ts |  32 ++++++++++++++++++++
+ src/DataStreamer.ts    |  31 +++++++++++++++++++
+ src/Graph.css          |   4 +++
+ src/Graph.tsx          |  66 +++++++++++++++++++++++++++++++++++++++++
+ src/index.css          |  14 +++++++++
+ src/index.tsx          |  11 +++++++
+ src/react-app-env.d.ts |   1 +
+ 13 files changed, 337 insertions(+)
+ create mode 100644 public/favicon.ico
+ create mode 100644 public/index.html
+ create mode 100644 public/manifest.json
+ create mode 100644 src/App.css
+ create mode 100644 src/App.test.js
+ create mode 100644 src/App.tsx
+ create mode 100644 src/DataManipulator.ts
+ create mode 100644 src/DataStreamer.ts
+ create mode 100644 src/Graph.css
+ create mode 100644 src/Graph.tsx
+ create mode 100644 src/index.css
+ create mode 100644 src/index.tsx
+ create mode 100644 src/react-app-env.d.ts
+
+diff --git a/public/favicon.ico b/public/favicon.ico
+new file mode 100644
+index 0000000000000000000000000000000000000000..a11777cc471a4344702741ab1c8a588998b1311a
+GIT binary patch
+literal 3870
+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
+baj7?x%VD!5Cxk2YbYLNVeiXvvpMCWYo=by@
+
+literal 0
+HcmV?d00001
+
+diff --git a/public/index.html b/public/index.html
+new file mode 100644
+index 0000000000..b40568f049
+--- /dev/null
++++ b/public/index.html
+@@ -0,0 +1,46 @@
++<!DOCTYPE html>
++<html lang="en">
++  <head>
++    <meta charset="utf-8" />
++    <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico" />
++    <meta
++      name="viewport"
++      content="width=device-width, initial-scale=1, shrink-to-fit=no"
++    />
++    <meta name="theme-color" content="#000000" />
++    <!--
++      manifest.json provides metadata used when your web app is added to the
++      homescreen on Android. See https://developers.google.com/web/fundamentals/web-app-manifest/
++    -->
++    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
++    <!--
++      Notice the use of %PUBLIC_URL% in the tags above.
++      It will be replaced with the URL of the `public` folder during the build.
++      Only files inside the `public` folder can be referenced from the HTML.
++
++      Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
++      work correctly both with client-side routing and a non-root public URL.
++      Learn how to configure a non-root public URL by running `npm run build`.
++    -->
++    <script src="https://unpkg.com/@jpmorganchase/perspective/build/perspective.js"></script>
++    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer/build/perspective.view.js"></script>
++    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer-hypergrid/build/hypergrid.plugin.js"></script>
++    <script src="https://unpkg.com/@jpmorganchase/perspective-viewer-highcharts/build/highcharts.plugin.js"></script>
++    <link rel='stylesheet' href="https://unpkg.com/@jpmorganchase/perspective-viewer/build/material.css" is="custom-style">
++    <title>React App</title>
++  </head>
++  <body>
++    <noscript>You need to enable JavaScript to run this app.</noscript>
++    <div id="root"></div>
++    <!--
++      This HTML file is a template.
++      If you open it directly in the browser, you will see an empty page.
++
++      You can add webfonts, meta tags, or analytics to this file.
++      The build step will place the bundled scripts into the <body> tag.
++
++      To begin the development, run `npm start` or `yarn start`.
++      To create a production bundle, use `npm run build` or `yarn build`.
++    -->
++  </body>
++</html>
+diff --git a/public/manifest.json b/public/manifest.json
+new file mode 100644
+index 0000000000..1f2f141faf
+--- /dev/null
++++ b/public/manifest.json
+@@ -0,0 +1,15 @@
++{
++  "short_name": "React App",
++  "name": "Create React App Sample",
++  "icons": [
++    {
++      "src": "favicon.ico",
++      "sizes": "64x64 32x32 24x24 16x16",
++      "type": "image/x-icon"
++    }
++  ],
++  "start_url": ".",
++  "display": "standalone",
++  "theme_color": "#000000",
++  "background_color": "#ffffff"
++}
+diff --git a/src/App.css b/src/App.css
+new file mode 100644
+index 0000000000..1a8747ad99
+--- /dev/null
++++ b/src/App.css
+@@ -0,0 +1,49 @@
++.App {
++  text-align: center;
++  min-height: 100vh;
++}
++
++.App-logo {
++  animation: App-logo-spin infinite 20s linear;
++  height: 40vmin;
++}
++
++.App-header {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  font-size: calc(10px + 2vmin);
++  margin-bottom: 12px;
++}
++
++.App-link {
++  color: #61dafb;
++}
++
++.App-content {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  margin-bottom: 12px;
++}
++
++.Stream-button {
++  margin-bottom: 12px;
++}
++
++.Graph {
++  min-height: 50vh;
++  width: 700px;
++  margin-bottom: 12px;
++}
++
++@keyframes App-logo-spin {
++  from {
++    transform: rotate(0deg);
++  }
++  to {
++    transform: rotate(360deg);
++  }
++}
+diff --git a/src/App.test.js b/src/App.test.js
+new file mode 100644
+index 0000000000..a754b201bf
+--- /dev/null
++++ b/src/App.test.js
+@@ -0,0 +1,9 @@
++import React from 'react';
++import ReactDOM from 'react-dom';
++import App from './App';
++
++it('renders without crashing', () => {
++  const div = document.createElement('div');
++  ReactDOM.render(<App />, div);
++  ReactDOM.unmountComponentAtNode(div);
++});
+diff --git a/src/App.tsx b/src/App.tsx
+new file mode 100644
+index 0000000000..274d20b0a0
+--- /dev/null
++++ b/src/App.tsx
+@@ -0,0 +1,59 @@
++import React, { Component } from 'react';
++import DataStreamer, { ServerRespond } from './DataStreamer';
++import Graph from './Graph';
++import './App.css';
++
++interface IState {
++  data: ServerRespond[],
++  showGraph: boolean,
++}
++
++class App extends Component<{}, IState> {
++  constructor(props: {}) {
++    super(props);
++    this.state = {
++      data: [],
++      showGraph: false,
++    };
++  }
++
++  renderGraph() {
++    if (this.state.showGraph) {
++      return (<Graph data={this.state.data}/>)
++    }
++  }
++
++  getDataFromServer() {
++    let x = 0;
++    const interval = setInterval(() => {
++      DataStreamer.getData((serverResponds: ServerRespond[]) => {
++        this.setState({
++          data: serverResponds,
++          showGraph: true,
++        });
++      });
++      x++;
++      if (x > 1000) {
++        clearInterval(interval);
++      }
++    }, 100);
++  }
++
++  render() {
++    return (
++      <div className="App">
++        <header className="App-header">
++          Bank Merge & Co Task 3
++        </header>
++        <div className="App-content">
++          <button className="btn btn-primary Stream-button" onClick={() => {this.getDataFromServer()}}>Start Streaming Data</button>
++          <div className="Graph">
++            {this.renderGraph()}
++          </div>
++        </div>
++      </div>
++    )
++  }
++}
++
++export default App;
+diff --git a/src/DataManipulator.ts b/src/DataManipulator.ts
+new file mode 100644
+index 0000000000..9b18f68777
+--- /dev/null
++++ b/src/DataManipulator.ts
+@@ -0,0 +1,32 @@
++import {ServerRespond} from './DataStreamer';
++
++export interface Row {
++    price_abc: number,
++    price_def: number,
++    ratio: number,
++    timestamp: Date,
++    upper_bound: number,
++    lower_bound: number,
++    trigger_alert: number | undefined,
++}
++
++
++export class DataManipulator {
++    static generateRow(serverRespond: ServerRespond[]): Row {
++        const priceABC = (serverRespond[0].top_ask.price + serverRespond[0].top_bid.price) / 2;
++        const priceDEF = (serverRespond[1].top_ask.price + serverRespond[1].top_bid.price) / 2;
++        const ratio = priceABC / priceDEF;
++        const upperBound = 1 + 0.05;
++        const lowerBound = 1 - 0.05;
++        return {
++            price_abc: priceABC,
++            price_def: priceDEF,
++            ratio,
++            timestamp: serverRespond[0].timestamp > serverRespond[1].timestamp ?
++                serverRespond[0].timestamp : serverRespond[1].timestamp,
++            upper_bound: upperBound,
++            lower_bound: lowerBound,
++            trigger_alert: (ratio > upperBound || ratio < lowerBound) ? ratio : undefined,
++        };
++    }
++}
+\ No newline at end of file
+diff --git a/src/DataStreamer.ts b/src/DataStreamer.ts
+new file mode 100644
+index 0000000000..9d9eca7897
+--- /dev/null
++++ b/src/DataStreamer.ts
+@@ -0,0 +1,31 @@
++export interface Order {
++  price: number,
++  size: number,
++}
++export interface ServerRespond {
++  stock: string,
++  top_bid: Order,
++  top_ask: Order,
++  timestamp: Date,
++}
++
++class DataStreamer {
++  static API_URL: string = 'http://localhost:8080/query?id=1';
++
++  static getData(callback: (data: ServerRespond[]) => void): void {
++    const request = new XMLHttpRequest();
++    request.open('GET', DataStreamer.API_URL, false);
++
++    request.onload = () => {
++      if (request.status === 200) {
++        callback(JSON.parse(request.responseText));
++      } else {
++        alert ('Request failed');
++      }
++    }
++
++    request.send();
++  }
++}
++
++export default DataStreamer;
+\ No newline at end of file
+diff --git a/src/Graph.css b/src/Graph.css
+new file mode 100644
+index 0000000000..c77c56054e
+--- /dev/null
++++ b/src/Graph.css
+@@ -0,0 +1,4 @@
++perspective-viewer {
++  height: 50vh;
++  width: 700px;
++}
+\ No newline at end of file
+diff --git a/src/Graph.tsx b/src/Graph.tsx
+new file mode 100644
+index 0000000000..f6f72dd6bf
+--- /dev/null
++++ b/src/Graph.tsx
+@@ -0,0 +1,66 @@
++import React, {Component} from 'react';
++import {Table, TableData} from '@finos/perspective';
++import {ServerRespond} from './DataStreamer';
++import {DataManipulator} from './DataManipulator';
++import './Graph.css';
++
++interface IProps {
++    data: ServerRespond[],
++}
++
++interface PerspectiveViewerElement extends HTMLElement {
++    load: (table: Table) => void,
++}
++
++class Graph extends Component<IProps, {}> {
++    table: Table | undefined;
++
++    render() {
++        return React.createElement('perspective-viewer');
++    }
++
++    componentDidMount() {
++        // Get element from the DOM.
++        const elem = document.getElementsByTagName('perspective-viewer')[0] as unknown as PerspectiveViewerElement;
++
++        const schema = {
++            price_abc: 'float',
++            price_def: 'float',
++            ratio: 'float',
++            timestamp: 'date',
++            upper_bound: 'float',
++            lower_bound: 'float',
++            trigger_alert: 'float'
++        };
++
++        if (window.perspective && window.perspective.worker()) {
++            this.table = window.perspective.worker().table(schema);
++        }
++        if (this.table) {
++            // Load the `table` in the `<perspective-viewer>` DOM reference.
++            elem.load(this.table);
++            elem.setAttribute('view', 'y_line');
++            elem.setAttribute('row-pivots', '["timestamp"]');
++            elem.setAttribute('columns', '["ratio", "lower_bound", "upper_bound", "trigger_alert"]');
++            elem.setAttribute('aggregates', JSON.stringify({
++                price_abc: 'avg',
++                price_def: 'avg',
++                ratio: 'avg',
++                timestamp: 'distinct count',
++                upper_bound: 'avg',
++                lower_bound: 'avg',
++                trigger_alert: 'avg'
++            }));
++        }
++    }
++
++    componentDidUpdate() {
++        if (this.table) {
++            this.table.update([
++                DataManipulator.generateRow(this.props.data),
++            ] as unknown as TableData);
++        }
++    }
++}
++
++export default Graph;
+\ No newline at end of file
+diff --git a/src/index.css b/src/index.css
+new file mode 100644
+index 0000000000..cee5f348fb
+--- /dev/null
++++ b/src/index.css
+@@ -0,0 +1,14 @@
++body {
++  margin: 0;
++  padding: 0;
++  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
++    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
++    sans-serif;
++  -webkit-font-smoothing: antialiased;
++  -moz-osx-font-smoothing: grayscale;
++}
++
++code {
++  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
++    monospace;
++}
+diff --git a/src/index.tsx b/src/index.tsx
+new file mode 100644
+index 0000000000..f742118e14
+--- /dev/null
++++ b/src/index.tsx
+@@ -0,0 +1,11 @@
++import React from 'react';
++import ReactDOM from 'react-dom';
++import App from './App';
++import './index.css';
++import 'bootstrap/dist/css/bootstrap.css';
++
++declare global {
++  interface Window { perspective: any; }
++}
++
++ReactDOM.render(<App />, document.getElementById('root'));
+diff --git a/src/react-app-env.d.ts b/src/react-app-env.d.ts
+new file mode 100644
+index 0000000000..6431bc5fc6
+--- /dev/null
++++ b/src/react-app-env.d.ts
+@@ -0,0 +1 @@
++/// <reference types="react-scripts" />
