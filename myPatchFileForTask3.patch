@@ -1,0 +1,137 @@
+From 30b87ea37e73839db1c094cff3a13ca3ba72c4e7 Mon Sep 17 00:00:00 2001
+From: Shashwat <sshashwatssingh@gmail.com>
+Date: Wed, 10 Jul 2024 13:56:50 +0530
+Subject: [PATCH] Modified typescript files to display live graph with ratio,
+ upper and lower bounds, and alerts
+
+---
+ src/DataManipulator.ts | 40 ++++++++++++++++++++++++++++++----------
+ src/Graph.tsx          | 33 +++++++++++++++++++++------------
+ 2 files changed, 51 insertions(+), 22 deletions(-)
+
+diff --git a/src/DataManipulator.ts b/src/DataManipulator.ts
+index 7f62295..97d2468 100644
+--- a/src/DataManipulator.ts
++++ b/src/DataManipulator.ts
+@@ -1,20 +1,40 @@
+ import { ServerRespond } from './DataStreamer';
+ 
+ export interface Row {
+-  stock: string,
+-  top_ask_price: number,
++  //updating this interface to include the new attributes that correspond to the schema of the table in the Graph component
++  //the update determines the structure of the object returned by the generate row function
++  price_abc: number,
++  price_def: number,
++  ratio: number,
+   timestamp: Date,
++  upper_bound: number,
++  lower_bound: number,
++  trigger_alert: number | undefined,
+ }
+ 
+ 
+ export class DataManipulator {
+-  static generateRow(serverResponds: ServerRespond[]) {
+-    return serverResponds.map((el: any) => {
+-      return {
+-        stock: el.stock,
+-        top_ask_price: el.top_ask && el.top_ask.price || 0,
+-        timestamp: el.timestamp,
+-      };
+-    })
++  /*
++  updating the function to return a new Row object with the new attributes.
++
++  the new attributes are: ratio, upper_bound, lower_bound, and trigger_alert
++
++  changed the return type to return a single Row object
++  */
++  static generateRow(serverRespond: ServerRespond[]): Row {
++    const priceABC =(serverRespond[0].top_ask.price + serverRespond[0].top_bid.price) /2;
++    const priceDEF =(serverRespond[1].top_ask.price + serverRespond[1].top_bid.price) /2;
++    const ratio = priceABC/priceDEF;
++    const upperBound = 1 + 0.05;
++    const lowerBound = 1 - 0.05;
++    return {
++      price_abc: priceABC,
++      price_def: priceDEF,
++      ratio,
++      timestamp: serverRespond[0].timestamp > serverRespond[1].timestamp ? serverRespond[0].timestamp : serverRespond[1].timestamp,
++      upper_bound: upperBound,
++      lower_bound: lowerBound,
++      trigger_alert: (ratio > upperBound || ratio < lowerBound) ? ratio : undefined,
++    }
+   }
+ }
+diff --git a/src/Graph.tsx b/src/Graph.tsx
+index 277797d..31a3e2f 100644
+--- a/src/Graph.tsx
++++ b/src/Graph.tsx
+@@ -1,5 +1,5 @@
+ import React, { Component } from 'react';
+-import { Table } from '@finos/perspective';
++import { Table, TableData } from '@finos/perspective';
+ import { ServerRespond } from './DataStreamer';
+ import { DataManipulator } from './DataManipulator';
+ import './Graph.css';
+@@ -23,10 +23,14 @@ class Graph extends Component<IProps, {}> {
+     const elem = document.getElementsByTagName('perspective-viewer')[0] as unknown as PerspectiveViewerElement;
+ 
+     const schema = {
+-      stock: 'string',
+-      top_ask_price: 'float',
+-      top_bid_price: 'float',
++      //making changes to the schema object to make it track ratio, upper_bound, lower_bound, and trigger_alert
++      price_abc: 'float',
++      price_def: 'float',
++      ratio: 'float',
+       timestamp: 'date',
++      upper_bound: 'float',
++      lower_bound: 'float',
++      trigger_alert: 'float',
+     };
+ 
+     if (window.perspective && window.perspective.worker()) {
+@@ -34,25 +38,30 @@ class Graph extends Component<IProps, {}> {
+     }
+     if (this.table) {
+       // Load the `table` in the `<perspective-viewer>` DOM reference.
++
++      //adding more attributes to the graph to track ratio, upper_bound, lower_bound, and trigger_alert
+       elem.load(this.table);
+       elem.setAttribute('view', 'y_line');
+-      elem.setAttribute('column-pivots', '["stock"]');
+       elem.setAttribute('row-pivots', '["timestamp"]');
+-      elem.setAttribute('columns', '["top_ask_price"]');
++      elem.setAttribute('columns', '["ratio", "lower_bound", "upper_bound", "trigger_alert"]');
+       elem.setAttribute('aggregates', JSON.stringify({
+-        stock: 'distinctcount',
+-        top_ask_price: 'avg',
+-        top_bid_price: 'avg',
+-        timestamp: 'distinct count',
++        price_abc: 'avg',
++        price_def: 'avg',
++        ratio: 'avg',
++        timestamp: 'avg',
++        upper_bound: 'avg',
++        lower_bound: 'avg',
++        trigger_alert: 'avg',
+       }));
+     }
+   }
+ 
+   componentDidUpdate() {
++    //making additional changes to the update function
+     if (this.table) {
+-      this.table.update(
++      this.table.update([
+         DataManipulator.generateRow(this.props.data),
+-      );
++      ] as unknown as TableData);
+     }
+   }
+ }
+-- 
+2.43.0.windows.1
+
