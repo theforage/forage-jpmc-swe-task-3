@@ -4,15 +4,15 @@ export interface Row {
   price_abc: number,
   price_def: number,
   ratio: number,
-  timestamp: Date,
   upper_bound: number,
   lower_bound: number,
   trigger_alert: number | undefined,
+  timestamp: Date,
 }
 
 
 export class DataManipulator {
-  static generateRow(serverRespond: ServerRespond[]): Row {
+    static generateRow(serverRespond: ServerRespond[]): Row {
     const priceABC = (serverRespond[0].top_ask.price + serverRespond[0].top_bid.price) / 2;
     const priceDEF = (serverRespond[1].top_ask.price + serverRespond[1].top_bid.price) / 2;
     const ratio = priceABC / priceDEF;
@@ -32,3 +32,4 @@ export class DataManipulator {
     
   }
 }
+
