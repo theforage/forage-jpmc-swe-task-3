@@ -9,6 +9,8 @@ interface IState {
 }
 
 class App extends Component<{}, IState> {
+  private intervalId: NodeJS.Timeout | undefined;
+
   constructor(props: {}) {
     super(props);
     this.state = {
@@ -17,15 +19,23 @@ class App extends Component<{}, IState> {
     };
   }
 
+  componentWillUnmount() {
+    // Clear the interval if the component is unmounted
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+    }
+  }
+
   renderGraph() {
     if (this.state.showGraph) {
-      return (<Graph data={this.state.data}/>)
+      return (<Graph data={this.state.data}/>);
     }
+    return null;
   }
 
   getDataFromServer() {
     let x = 0;
-    const interval = setInterval(() => {
+    this.intervalId = setInterval(() => {
       DataStreamer.getData((serverResponds: ServerRespond[]) => {
         this.setState({
           data: serverResponds,
@@ -34,7 +44,10 @@ class App extends Component<{}, IState> {
       });
       x++;
       if (x > 1000) {
-        clearInterval(interval);
+        // Stop fetching after 1000 intervals
+        if (this.intervalId) {
+          clearInterval(this.intervalId);
+        }
       }
     }, 100);
   }
@@ -52,7 +65,7 @@ class App extends Component<{}, IState> {
           </div>
         </div>
       </div>
-    )
+    );
   }
 }
 

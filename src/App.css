@@ -35,8 +35,15 @@
 
 .Graph {
   min-height: 50vh;
-  width: 700px;
+  width: 700px; /* Fixed width */
   margin-bottom: 12px;
+}
+
+/* Responsive design for screens smaller than 768px */
+@media (max-width: 768px) {
+  .Graph {
+    width: 90%; /* Adjust width to be responsive */
+  }
 }
 
 @keyframes App-logo-spin {

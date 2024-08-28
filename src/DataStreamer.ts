@@ -2,6 +2,7 @@ export interface Order {
   price: number,
   size: number,
 }
+
 export interface ServerRespond {
   stock: string,
   top_bid: Order,
@@ -12,19 +13,19 @@ export interface ServerRespond {
 class DataStreamer {
   static API_URL: string = 'http://localhost:8080/query?id=1';
 
-  static getData(callback: (data: ServerRespond[]) => void): void {
-    const request = new XMLHttpRequest();
-    request.open('GET', DataStreamer.API_URL, false);
-
-    request.onload = () => {
-      if (request.status === 200) {
-        callback(JSON.parse(request.responseText));
+  static async getData(callback: (data: ServerRespond[]) => void): Promise<void> {
+    try {
+      const response = await fetch(DataStreamer.API_URL);
+      
+      if (response.ok) {
+        const data = await response.json();
+        callback(data);
       } else {
-        alert ('Request failed');
+        console.error(`Request failed with status ${response.status}`);
       }
+    } catch (error) {
+      console.error('Error fetching data:', error);
     }
-
-    request.send();
   }
 }
 
